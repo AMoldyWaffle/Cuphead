@@ -156,43 +156,60 @@
       return new Blob(chunks);
     }
 
-    function loadScriptWithFallback(path) {
-      return new Promise((resolve, reject) => {
-        const urls = sourceUrls(path);
-        let index = 0;
-        const errors = [];
+    // Fetch UnityLoader.js as text, using the same fetch-based approach as the
+    // working Isaac launcher. This avoids the browser's separate script-src
+    // loading path, which was failing in the Chromebook HTML runner.
+    async function loadScriptWithFallback(path) {
+      const urls = sourceUrls(path);
+      const failures = [];
 
-        function attempt() {
-          if (index >= urls.length) {
-            reject(new Error(
-              "UnityLoader.js could not be loaded from any source. " +
-              errors.join(" | ")
-            ));
+      for (let i = 0; i < urls.length; i++) {
+        try {
+          const headers = i === 0 ? {
+            "Accept": "application/vnd.github.raw+json",
+            "X-GitHub-Api-Version": "2022-11-28"
+          } : {};
+
+          const response = await fetch(urls[i], {
+            method: "GET",
+            headers,
+            cache: "no-store"
+          });
+
+          if (!response.ok) {
+            throw new Error("HTTP " + response.status);
+          }
+
+          const source = await response.text();
+          if (!source || source.trim().length < 20 ||
+              source.trim().startsWith("{") ||
+              source.toLowerCase().includes("404: not found")) {
+            throw new Error("The server did not return valid JavaScript.");
+          }
+
+          // Insert as an inline classic script so UnityLoader is defined in the
+          // page's global scope, just as it would be with a normal script tag.
+          const script = document.createElement("script");
+          script.text = source;
+          document.head.appendChild(script);
+          script.remove();
+
+          if (window.UnityLoader &&
+              typeof window.UnityLoader.instantiate === "function") {
             return;
           }
 
-          const script = document.createElement("script");
-          script.src = urls[index++];
-          script.onload = () => {
-            // A 200 response containing an API error/JSON document is not a usable script.
-            if (window.UnityLoader && typeof UnityLoader.instantiate === "function") {
-              resolve();
-            } else {
-              errors.push(script.src + " (loaded, but did not define UnityLoader)");
-              script.remove();
-              attempt();
-            }
-          };
-          script.onerror = () => {
-            errors.push(script.src + " (network/load error)");
-            script.remove();
-            attempt();
-          };
-          document.head.appendChild(script);
+          throw new Error("JavaScript loaded, but UnityLoader.instantiate was not defined.");
+        } catch (error) {
+          failures.push("Source " + (i + 1) + " " + urls[i] +
+            " — " + (error.message || error));
         }
+      }
 
-        attempt();
-      });
+      throw new Error(
+        "UnityLoader.js could not be fetched from any source.\n" +
+        failures.join("\n")
+      );
     }
 
     function partUrl(name, number) {
