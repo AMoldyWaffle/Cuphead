@@ -5,9 +5,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
 
-  <base href="https://cdn.jsdelivr.net/gh/web-ports/cuphead@c9ff1b6b16f9d402b78a42fc2200e1c076c0ab6e/">
+  <base href="https://raw.githubusercontent.com/AMoldyWaffle/Cuphead/main/">
 
-  <title>Cuphead</title>
+  <title>Cuphead - Chromebook Diagnostics</title>
 
   <style>
     * { box-sizing: border-box; }
@@ -81,6 +81,22 @@
       white-space: pre-wrap;
     }
 
+    #diagnostics {
+      display: block;
+      width: min(92vw, 760px);
+      max-height: 34vh;
+      overflow: auto;
+      padding: 10px;
+      border: 1px solid #454545;
+      border-radius: 6px;
+      background: #111;
+      color: #cfcfcf;
+      text-align: left;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font: 11px/1.45 monospace;
+    }
+
     #retry {
       display: none;
       justify-self: center;
@@ -104,6 +120,8 @@
     </div>
     <div id="detail">Starting downloads</div>
     <div id="error"></div>
+    <pre id="diagnostics">Diagnostics will appear here.
+Launcher starting…</pre>
     <button id="retry" type="button" onclick="location.reload()">
       Try again
     </button>
@@ -121,11 +139,25 @@
     const bar = document.getElementById("bar");
     const errorBox = document.getElementById("error");
     const retry = document.getElementById("retry");
+    const diagnosticsBox = document.getElementById("diagnostics");
+
+    // Startup state is shared by all diagnostic handlers. Keep it outside
+    // load() so early browser errors cannot hit uninitialized variables.
+    let unityReady = false;
+    let lastProgress = 0;
+    let startupTimer = null;
+    let startupStartedAt = 0;
 
     // Adaptive download settings.
-    const MIN_DOWNLOADS = 4;
-    const START_DOWNLOADS = 24;
-    const MAX_DOWNLOADS = 32;
+    // Use a smaller download pool on memory-constrained devices.
+    // Chromebook models commonly expose 4 GB or less through deviceMemory.
+    const deviceMemory = Number(navigator.deviceMemory || 0);
+    const isLowMemory = deviceMemory > 0 && deviceMemory <= 4;
+    const isMidMemory = deviceMemory > 4 && deviceMemory <= 8;
+
+    const MIN_DOWNLOADS = 2;
+    const START_DOWNLOADS = isLowMemory ? 4 : isMidMemory ? 6 : 10;
+    const MAX_DOWNLOADS = isLowMemory ? 4 : isMidMemory ? 6 : 12;
 
     let currentDownloads = START_DOWNLOADS;
     let fastCompletions = 0;
@@ -133,6 +165,9 @@
 
     // Download sources.
     const CDN_ROOT =
+      "https://cdn.jsdelivr.net/gh/AMoldyWaffle/Cuphead@main/";
+
+    const FALLBACK_CDN_ROOT =
       "https://cdn.jsdelivr.net/gh/web-ports/cuphead@c9ff1b6b16f9d402b78a42fc2200e1c076c0ab6e/";
 
     const RAW_ROOT =
@@ -159,13 +194,67 @@
         ? error.message
         : String(error);
 
-      errorBox.textContent =
-        message +
-        "\n\nIf this is on a Chromebook, send me this exact error. " +
-        "A fallback repository must contain the same Build files and numbered parts.";
-
+      errorBox.textContent = message;
+      note("FATAL: " + message);
+      diagnosticsBox.textContent = browserDiagnostics("Startup failure");
       retry.style.display = "inline-block";
     }
+
+    const diagnosticEvents = [];
+    function note(message) {
+      const stamp = new Date().toLocaleTimeString();
+      diagnosticEvents.push("[" + stamp + "] " + String(message));
+      if (diagnosticEvents.length > 60) diagnosticEvents.shift();
+      if (diagnosticsBox) {
+        diagnosticsBox.textContent = diagnosticEvents.join("\n");
+        diagnosticsBox.scrollTop = diagnosticsBox.scrollHeight;
+      }
+    }
+
+    function browserDiagnostics(reason) {
+      let webgl = "unavailable";
+      try {
+        const canvas = document.createElement("canvas");
+        const gl = canvas.getContext("webgl2") || canvas.getContext("webgl") ||
+                   canvas.getContext("experimental-webgl");
+        webgl = gl ? "available" : "NOT available";
+        if (gl && gl.getParameter) {
+          const renderer = gl.getParameter(gl.RENDERER);
+          if (renderer) webgl += " (" + renderer + ")";
+        }
+      } catch (e) { webgl = "error: " + e.message; }
+      return reason + "\nWebAssembly: " +
+        (typeof WebAssembly !== "undefined" ? "available" : "NOT available") +
+        "\nWebGL: " + webgl +
+        "\nLast Unity progress: " + Math.round(lastProgress * 100) + "%" +
+        "\nEvents:\n- " + diagnosticEvents.slice(-12).join("\n- ");
+    }
+
+    function reportStartupProblem(reason) {
+      if (unityReady) return;
+      status.textContent = "Cuphead startup is stuck or failed.";
+      detail.textContent = "Diagnostic information is shown below.";
+      errorBox.style.display = "block";
+      errorBox.textContent = reason;
+      diagnosticsBox.textContent = browserDiagnostics(reason);
+      retry.style.display = "inline-block";
+    }
+
+    // Install global error handlers BEFORE Unity is started so early failures
+    // are not missed.
+    window.addEventListener("error", function (event) {
+      const msg = event.message || (event.target && event.target.src) || "Unknown browser error";
+      note("Browser error: " + msg + (event.filename ? " | " + event.filename + ":" + event.lineno + ":" + event.colno : ""));
+      if (startupStartedAt && !unityReady) {
+        reportStartupProblem("JavaScript/resource error: " + msg);
+      }
+    }, true);
+
+    window.addEventListener("unhandledrejection", function (event) {
+      const msg = event.reason && (event.reason.stack || event.reason.message) || String(event.reason);
+      note("Unhandled promise rejection: " + msg);
+      if (startupStartedAt && !unityReady) reportStartupProblem("Unhandled promise rejection: " + msg);
+    });
 
     function sourceUrls(path) {
       const safePath = path
@@ -176,6 +265,7 @@
       return [
         RAW_ROOT + safePath,
         CDN_ROOT + path,
+        FALLBACK_CDN_ROOT + path,
         API_ROOT + safePath + "?ref=main"
       ];
     }
@@ -470,7 +560,45 @@
       });
     }
 
+    // Log all XHR requests and failures directly in the page. Unity's older
+    // loader uses XHR for the JSON, framework, memory, and data files.
+    const xhrOpenOriginal = XMLHttpRequest.prototype.open;
+    const xhrSendOriginal = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+      this.__cupheadUrl = String(url);
+      return xhrOpenOriginal.call(this, method, url, ...rest);
+    };
+    XMLHttpRequest.prototype.send = function(...args) {
+      const xhr = this;
+      const url = xhr.__cupheadUrl || "(unknown URL)";
+      if (startupStartedAt) note("XHR started: " + url);
+      xhr.addEventListener("loadend", function() {
+        note("XHR finished: HTTP " + xhr.status + " | " + url);
+        if (xhr.status === 0 || xhr.status >= 400) {
+          reportStartupProblem("XHR failed (HTTP " + xhr.status + "): " + url);
+        }
+      }, { once: true });
+      return xhrSendOriginal.apply(this, args);
+    };
+
     async function load() {
+      startupStartedAt = Date.now();
+      note("Launcher initialized");
+      note("Browser: " + navigator.userAgent);
+      note("WebAssembly: " + (typeof WebAssembly !== "undefined"));
+      try {
+        const glCanvas = document.createElement("canvas");
+        const gl2 = glCanvas.getContext("webgl2");
+        note("WebGL 2: " + (gl2 ? "available" : "NOT available"));
+        if (gl2) {
+          const debugInfo = gl2.getExtension("WEBGL_debug_renderer_info");
+          if (debugInfo) note("Graphics renderer: " + gl2.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL));
+      }
+      } catch (glError) {
+        note("WebGL 2 check failed: " + glError.message);
+      }
+      note("Base URL: " + document.baseURI);
+      note("Device memory: " + (navigator.deviceMemory || "not exposed"));
       try {
         status.textContent = "Loading game engine…";
         detail.textContent = "Preparing downloads";
@@ -598,6 +726,10 @@
             parts.map(part => part.blob)
           );
 
+          // Drop references to the individual downloaded parts immediately.
+          for (let i = 0; i < parts.length; i++) {
+            parts[i].blob = null;
+          }
           parts.length = 0;
         }
 
@@ -607,6 +739,10 @@
         for (const asset of assets) {
           objectUrls[asset.name] =
             URL.createObjectURL(asset.blob);
+
+          // The object URL retains the Blob; the extra JS reference is
+          // unnecessary and can increase memory pressure on Chromebooks.
+          asset.blob = null;
         }
 
         // Intercept only the original Unity asset requests.
@@ -645,20 +781,69 @@
         detail.textContent = "Using original Unity configuration path";
 
         status.textContent = "Starting Cuphead…";
-        detail.textContent = "Files ready";
+        detail.textContent =
+          "Downloads complete · initializing Unity WebGL";
 
-        bar.style.width = "100%";
+        bar.style.width = "0%";
+        bar.style.background = "#eee";
 
-        UnityLoader.instantiate(
+        // Unity downloads and runtime initialization are separate stages.
+        // onProgress reaching 1 means the build assets downloaded; it does not
+        // guarantee that WebAssembly has initialized. Use Module callback too.
+
+        note("Calling UnityLoader.instantiate with Build/CupheadPort.json");
+        const gameInstance = UnityLoader.instantiate(
           "gameContainer",
-          "Build/CupheadPort.json"
+          "Build/CupheadPort.json",
+          {
+            onProgress: function (instance, progress) {
+              if (!Number.isFinite(progress)) return;
+              lastProgress = Math.max(0, Math.min(1, progress));
+              const percent = Math.round(lastProgress * 100);
+              note("Unity download progress: " + percent + "%");
+              status.textContent = "Loading Cuphead… " + percent + "%";
+              detail.textContent = "Unity is downloading its build configuration and assets";
+              bar.style.width = percent + "%";
+            },
+            Module: {
+              onRuntimeInitialized: function () {
+                unityReady = true;
+                if (startupTimer) clearTimeout(startupTimer);
+                note("Unity runtime initialized successfully");
+                status.textContent = "Cuphead loaded";
+                detail.textContent = "Starting game…";
+                bar.style.width = "100%";
+                setTimeout(function () { loading.style.display = "none"; }, 300);
+              },
+              onAbort: function (reason) {
+                note("Unity Module.onAbort: " + reason);
+                reportStartupProblem("Unity aborted: " + reason);
+              }
+            }
+          }
         );
 
-        loading.style.display = "none";
+        if (!gameInstance) {
+          throw new Error("UnityLoader.instantiate did not return a game instance.");
+        }
+
+        note("UnityLoader.instantiate returned a game instance");
+        detail.textContent = "Unity instance created · waiting for WebAssembly runtime";
+
+        // If no callback arrives, show the collected evidence instead of
+        // leaving a blank, motionless progress bar indefinitely.
+        startupTimer = setTimeout(function () {
+          reportStartupProblem("No Unity runtime initialization callback after 45 seconds.");
+        }, 45000);
+
+        // Do not hide the loading screen here: instantiate() only starts Unity.
+        detail.textContent =
+          "Unity instance created · waiting for WebAssembly runtime";
 
       } catch (error) {
-        console.error("Cuphead loading error:", error);
-        showError(error);
+        const full = error && (error.stack || error.message) ? (error.stack || error.message) : String(error);
+        note("Caught exception: " + full);
+        showError(full);
       }
     }
 
