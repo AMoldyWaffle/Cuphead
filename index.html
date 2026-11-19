@@ -3,6 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
   <base href="https://cdn.jsdelivr.net/gh/web-ports/cuphead@c9ff1b6b16f9d402b78a42fc2200e1c076c0ab6e/">
   <title>Cuphead</title>
   <style>
@@ -46,7 +49,7 @@
     const retry = document.getElementById("retry");
 
     const CACHE_NAME = "cuphead-assets-v3";
-    const PARALLEL_DOWNLOADS = 8;
+    const PARALLEL_DOWNLOADS = 3;
 
     // Sources are tried in order: jsDelivr, GitHub Raw, then the GitHub API.
     const CDN_ROOT =
@@ -75,32 +78,37 @@
       detail.textContent = "";
       bar.style.background = "#e45b5b";
       errorBox.style.display = "block";
-      errorBox.textContent = error && error.message ? error.message : String(error);
+      const message = error && error.message ? error.message : String(error);
+      errorBox.textContent = message +
+        "\\n\\nIf this is on a Chromebook, send me this exact error. " +
+        "A fallback repository must contain the same Build files and numbered parts.";
       retry.style.display = "inline-block";
     }
 
     function sourceUrls(path) {
       const safePath = path.split("/").map(encodeURIComponent).join("/");
+      // Match the working Isaac launcher: GitHub API first, Raw GitHub second.
+      // Keep the original jsDelivr host as a final fallback.
       return [
-        withCacheBuster(CDN_ROOT + path),
+        withCacheBuster(API_ROOT + safePath + "?ref=main"),
         withCacheBuster(RAW_ROOT + safePath),
-        withCacheBuster(API_ROOT + safePath + "?ref=main")
+        withCacheBuster(CDN_ROOT + path)
       ];
     }
 
-    async function fetchWithFallback(path, options = {}) {
+    async function fetchWithFallback(path) {
       const urls = sourceUrls(path);
       const failures = [];
 
       for (let i = 0; i < urls.length; i++) {
         try {
-          const headers = { ...(options.headers || {}) };
-          if (i === 2) {
-            headers.Accept = "application/vnd.github.raw+json";
-          }
+          const headers = i === 0 ? {
+            "Accept": "application/vnd.github.raw+json",
+            "X-GitHub-Api-Version": "2022-11-28"
+          } : {};
 
           const response = await fetch(urls[i], {
-            ...options,
+            method: "GET",
             headers,
             cache: "no-store"
           });
@@ -111,13 +119,41 @@
 
           return response;
         } catch (error) {
-          failures.push(urls[i] + " — " + (error.message || error));
+          failures.push("Source " + (i + 1) + " " + urls[i] +
+            " — " + (error.message || error));
         }
       }
 
       throw new Error(
-        "All download sources failed for " + path + ". " + failures.join(" | ")
+        "All download sources failed for " + path + ".\\n" + failures.join("\\n")
       );
+    }
+
+    // Stream each part into chunks as it arrives, like the working Isaac launcher.
+    // This also lets the loading screen show real downloaded bytes while a part is in flight.
+    async function responseToBlob(response, path, onChunk) {
+      if (!response.body || !response.body.getReader) {
+        throw new Error("Streaming is not supported by this browser for " + path);
+      }
+
+      const reader = response.body.getReader();
+      const chunks = [];
+      let received = 0;
+
+      while (true) {
+        const result = await reader.read();
+        if (result.done) break;
+
+        chunks.push(result.value);
+        received += result.value.byteLength;
+        if (onChunk) onChunk(received);
+      }
+
+      if (received === 0) {
+        throw new Error("The downloaded file was empty: " + path);
+      }
+
+      return new Blob(chunks);
     }
 
     function loadScriptWithFallback(path) {
@@ -137,9 +173,18 @@
 
           const script = document.createElement("script");
           script.src = urls[index++];
-          script.onload = () => resolve();
+          script.onload = () => {
+            // A 200 response containing an API error/JSON document is not a usable script.
+            if (window.UnityLoader && typeof UnityLoader.instantiate === "function") {
+              resolve();
+            } else {
+              errors.push(script.src + " (loaded, but did not define UnityLoader)");
+              script.remove();
+              attempt();
+            }
+          };
           script.onerror = () => {
-            errors.push(script.src);
+            errors.push(script.src + " (network/load error)");
             script.remove();
             attempt();
           };
@@ -154,17 +199,18 @@
       return "Build/" + name + ".part" + number;
     }
 
-    async function downloadPart(cache, path, progress) {
+    async function downloadPart(cache, path, onChunk, onComplete) {
       const cacheKey = new Request(new URL(path, CDN_ROOT).href);
       const response = await fetchWithFallback(path);
-      const blob = await response.blob();
-      progress(Number(response.headers.get("content-length")) || blob.size);
+      const blob = await responseToBlob(response, path, onChunk);
 
-      // Store under a stable key so a part downloaded from any mirror can be reused.
-      try {
-        await cache.put(cacheKey, new Response(blob));
-      } catch (_) {}
+      if (cache) {
+        try {
+          await cache.put(cacheKey, new Response(blob));
+        } catch (_) {}
+      }
 
+      onComplete(blob.size);
       return blob;
     }
 
@@ -186,8 +232,28 @@
       return results;
     }
 
+    async function clearLocalCaches() {
+      // Cache Storage is origin-scoped. Delete every cache visible to this page,
+      // not just this launcher's named cache. Some file:///Chromebook contexts
+      // do not expose Cache Storage, so failure here must not stop the game.
+      if (!("caches" in window)) return null;
+
+      try {
+        const names = await caches.keys();
+        await Promise.all(names.map(name => caches.delete(name)));
+        return await caches.open(CACHE_NAME);
+      } catch (error) {
+        console.warn("Could not clear browser Cache Storage:", error);
+        return null;
+      }
+    }
+
     async function load() {
       try {
+        status.textContent = "Clearing old game cache…";
+        detail.textContent = "Preparing a fresh download";
+        const cache = await clearLocalCaches();
+
         status.textContent = "Loading game engine…";
         detail.textContent = "Trying available sources";
         await loadScriptWithFallback("Build/UnityLoader.js");
@@ -196,22 +262,39 @@
           throw new Error("UnityLoader.js loaded, but UnityLoader.instantiate is unavailable.");
         }
 
-        // Clear this launcher's saved Cache Storage entries before downloading.
-        // This does not purge a shared CDN's edge cache; unique URLs above request fresh copies.
-        try {
-          await caches.delete(CACHE_NAME);
-        } catch (_) {}
-
-        const cache = await caches.open(CACHE_NAME);
         const totalParts = assets.reduce((sum, asset) => sum + asset.count, 0);
         let completedParts = 0;
+        let downloadedBytes = 0;
+        // Track the latest byte count for each active part. Summing these avoids
+        // the progress display jumping backward when concurrent downloads report.
+        const activePartBytes = new Map();
 
-        function updateProgress(assetName) {
-          completedParts++;
+        function formatSize(bytes) {
+          return (bytes / 1048576).toFixed(1) + " MB";
+        }
+
+        function renderProgress(assetName) {
+          let inFlightBytes = 0;
+          for (const value of activePartBytes.values()) inFlightBytes += value;
+
           const percent = Math.round(completedParts / totalParts * 100);
           bar.style.width = percent + "%";
           status.textContent = "Downloading game files… " + percent + "%";
-          detail.textContent = completedParts + " / " + totalParts + " parts · " + assetName;
+          detail.textContent = formatSize(downloadedBytes + inFlightBytes) +
+            " received · " + completedParts + " / " + totalParts +
+            " parts · " + assetName;
+        }
+
+        function updateChunkProgress(partKey, assetName, partBytes) {
+          activePartBytes.set(partKey, partBytes);
+          renderProgress(assetName);
+        }
+
+        function updateProgress(partKey, assetName, partSize) {
+          activePartBytes.delete(partKey);
+          completedParts++;
+          downloadedBytes += partSize;
+          renderProgress(assetName);
         }
 
         // Process one large asset at a time to reduce peak memory use.
@@ -227,7 +310,8 @@
             const blob = await downloadPart(
               cache,
               task.path,
-              () => updateProgress(asset.name)
+              partBytes => updateChunkProgress(task.path, asset.name, partBytes),
+              partSize => updateProgress(task.path, asset.name, partSize)
             );
             return { order: task.order, blob };
           });
@@ -235,9 +319,11 @@
           parts.sort((a, b) => a.order - b.order);
           asset.blob = new Blob(parts.map(part => part.blob));
 
-          try {
-            await cache.put(mergedKey, new Response(asset.blob));
-          } catch (_) {}
+          if (cache) {
+            try {
+              await cache.put(mergedKey, new Response(asset.blob));
+            } catch (_) {}
+          }
 
           parts.length = 0;
         }
