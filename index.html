@@ -1,37 +1,114 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+
   <base href="https://cdn.jsdelivr.net/gh/web-ports/cuphead@c9ff1b6b16f9d402b78a42fc2200e1c076c0ab6e/">
+
   <title>Cuphead</title>
+
   <style>
     * { box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #080808; color: #eee; font: 14px Arial, sans-serif; }
-    #gameContainer { width: 100vw; height: 100vh; }
-    #gameContainer canvas { width: 100% !important; height: 100% !important; }
-    #loading {
-      position: fixed; inset: 0; z-index: 10; display: grid; place-content: center;
-      gap: 14px; padding: 24px; background: #080808; text-align: center;
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #080808;
+      color: #eee;
+      font: 14px Arial, sans-serif;
     }
-    #loading h1 { margin: 0; font-size: 24px; letter-spacing: 2px; }
+
+    #gameContainer {
+      width: 100vw;
+      height: 100vh;
+    }
+
+    #gameContainer canvas {
+      width: 100% !important;
+      height: 100% !important;
+    }
+
+    #loading {
+      position: fixed;
+      inset: 0;
+      z-index: 10;
+      display: grid;
+      place-content: center;
+      gap: 14px;
+      padding: 24px;
+      background: #080808;
+      text-align: center;
+    }
+
+    #loading h1 {
+      margin: 0;
+      font-size: 24px;
+      letter-spacing: 2px;
+    }
+
     #status { color: #bbb; }
-    .track { width: min( min(78vw, 420px), 420px ); height: 8px; overflow: hidden; border-radius: 20px; background: #292929; }
-    #bar { width: 0%; height: 100%; background: #eee; transition: width .12s linear; }
-    #detail { color: #888; font-size: 12px; }
-    #error { display: none; max-width: 560px; color: #ff8585; line-height: 1.5; overflow-wrap: anywhere; }
-    #retry { display: none; justify-self: center; padding: 9px 16px; border: 0; border-radius: 5px; background: #eee; color: #111; cursor: pointer; }
+
+    .track {
+      width: min(78vw, 420px);
+      height: 8px;
+      overflow: hidden;
+      border-radius: 20px;
+      background: #292929;
+    }
+
+    #bar {
+      width: 0%;
+      height: 100%;
+      background: #eee;
+      transition: width .12s linear;
+    }
+
+    #detail {
+      color: #888;
+      font-size: 12px;
+    }
+
+    #error {
+      display: none;
+      max-width: 560px;
+      color: #ff8585;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+      white-space: pre-wrap;
+    }
+
+    #retry {
+      display: none;
+      justify-self: center;
+      padding: 9px 16px;
+      border: 0;
+      border-radius: 5px;
+      background: #eee;
+      color: #111;
+      cursor: pointer;
+    }
   </style>
 </head>
+
 <body>
+
   <div id="loading" role="status" aria-live="polite">
     <h1>CUPHEAD</h1>
     <div id="status">Preparing game files…</div>
-    <div class="track"><div id="bar"></div></div>
+    <div class="track">
+      <div id="bar"></div>
+    </div>
     <div id="detail">Starting downloads</div>
     <div id="error"></div>
-    <button id="retry" type="button" onclick="location.reload()">Try again</button>
+    <button id="retry" type="button" onclick="location.reload()">
+      Try again
+    </button>
   </div>
+
   <div id="gameContainer"></div>
 
   <script>
@@ -45,23 +122,26 @@
     const errorBox = document.getElementById("error");
     const retry = document.getElementById("retry");
 
-    // Aggressive adaptive downloader: starts fast, then backs off when the
-    // server/browser shows signs of throttling or connection instability.
+    // Adaptive download settings.
     const MIN_DOWNLOADS = 4;
     const START_DOWNLOADS = 24;
     const MAX_DOWNLOADS = 32;
+
     let currentDownloads = START_DOWNLOADS;
     let fastCompletions = 0;
     let throttleEvents = 0;
 
-    // Sources are tried in order: GitHub Raw, jsDelivr, then the GitHub API.
+    // Download sources.
     const CDN_ROOT =
       "https://cdn.jsdelivr.net/gh/web-ports/cuphead@c9ff1b6b16f9d402b78a42fc2200e1c076c0ab6e/";
+
     const RAW_ROOT =
       "https://raw.githubusercontent.com/AMoldyWaffle/Cuphead/main/";
+
     const API_ROOT =
       "https://api.github.com/repos/AMoldyWaffle/Cuphead/contents/";
 
+    // Original Unity asset files.
     const assets = [
       { name: "CupheadPort.data.unityweb", count: 103 },
       { name: "CupheadPort.wasm.code.unityweb", count: 2 },
@@ -72,18 +152,27 @@
       status.textContent = "The game could not be loaded.";
       detail.textContent = "";
       bar.style.background = "#e45b5b";
+
       errorBox.style.display = "block";
-      const message = error && error.message ? error.message : String(error);
-      errorBox.textContent = message +
-        "\\n\\nIf this is on a Chromebook, send me this exact error. " +
+
+      const message = error && error.message
+        ? error.message
+        : String(error);
+
+      errorBox.textContent =
+        message +
+        "\n\nIf this is on a Chromebook, send me this exact error. " +
         "A fallback repository must contain the same Build files and numbered parts.";
+
       retry.style.display = "inline-block";
     }
 
     function sourceUrls(path) {
-      const safePath = path.split("/").map(encodeURIComponent).join("/");
-      // Try direct file hosts first. The GitHub API is a fallback because
-      // every numbered part would otherwise consume a separate API request.
+      const safePath = path
+        .split("/")
+        .map(encodeURIComponent)
+        .join("/");
+
       return [
         RAW_ROOT + safePath,
         CDN_ROOT + path,
@@ -111,29 +200,36 @@
           if (!response.ok) {
             const err = new Error("HTTP " + response.status);
             err.httpStatus = response.status;
+
             if ([408, 425, 429, 500, 502, 503, 504].includes(response.status)) {
               err.throttled = true;
             }
+
             throw err;
           }
 
           return response;
+
         } catch (error) {
-          failures.push("Source " + (i + 1) + " " + urls[i] +
-            " — " + (error.message || error));
+          failures.push(
+            "Source " + (i + 1) + " " + urls[i] +
+            " — " + (error.message || error)
+          );
         }
       }
 
       throw new Error(
-        "All download sources failed for " + path + ".\\n" + failures.join("\\n")
+        "All download sources failed for " +
+        path + ".\n" + failures.join("\n")
       );
     }
 
-    // Stream each part into chunks as it arrives, like the working Isaac launcher.
-    // This also lets the loading screen show real downloaded bytes while a part is in flight.
+    // Stream downloaded parts into memory.
     async function responseToBlob(response, path, onChunk) {
       if (!response.body || !response.body.getReader) {
-        throw new Error("Streaming is not supported by this browser for " + path);
+        throw new Error(
+          "Streaming is not supported by this browser for " + path
+        );
       }
 
       const reader = response.body.getReader();
@@ -142,11 +238,15 @@
 
       while (true) {
         const result = await reader.read();
+
         if (result.done) break;
 
         chunks.push(result.value);
         received += result.value.byteLength;
-        if (onChunk) onChunk(received);
+
+        if (onChunk) {
+          onChunk(received);
+        }
       }
 
       if (received === 0) {
@@ -156,9 +256,7 @@
       return new Blob(chunks);
     }
 
-    // Fetch UnityLoader.js as text, using the same fetch-based approach as the
-    // working Isaac launcher. This avoids the browser's separate script-src
-    // loading path, which was failing in the Chromebook HTML runner.
+    // Fetch UnityLoader.js and inject it as a classic inline script.
     async function loadScriptWithFallback(path) {
       const urls = sourceUrls(path);
       const failures = [];
@@ -181,28 +279,37 @@
           }
 
           const source = await response.text();
-          if (!source || source.trim().length < 20 ||
-              source.trim().startsWith("{") ||
-              source.toLowerCase().includes("404: not found")) {
+
+          if (
+            !source ||
+            source.trim().length < 20 ||
+            source.trim().startsWith("{") ||
+            source.toLowerCase().includes("404: not found")
+          ) {
             throw new Error("The server did not return valid JavaScript.");
           }
 
-          // Insert as an inline classic script so UnityLoader is defined in the
-          // page's global scope, just as it would be with a normal script tag.
           const script = document.createElement("script");
           script.text = source;
           document.head.appendChild(script);
           script.remove();
 
-          if (window.UnityLoader &&
-              typeof window.UnityLoader.instantiate === "function") {
+          if (
+            window.UnityLoader &&
+            typeof window.UnityLoader.instantiate === "function"
+          ) {
             return;
           }
 
-          throw new Error("JavaScript loaded, but UnityLoader.instantiate was not defined.");
+          throw new Error(
+            "JavaScript loaded, but UnityLoader.instantiate was not defined."
+          );
+
         } catch (error) {
-          failures.push("Source " + (i + 1) + " " + urls[i] +
-            " — " + (error.message || error));
+          failures.push(
+            "Source " + (i + 1) + " " + urls[i] +
+            " — " + (error.message || error)
+          );
         }
       }
 
@@ -216,100 +323,178 @@
       return "Build/" + name + ".part" + number;
     }
 
+    // Adjust the download pool based on connection performance.
     function adaptConcurrency(event) {
       if (event && event.throttled) {
         throttleEvents++;
         fastCompletions = 0;
-        const next = Math.max(MIN_DOWNLOADS, Math.floor(currentDownloads * 0.6));
+
+        const next = Math.max(
+          MIN_DOWNLOADS,
+          Math.floor(currentDownloads * 0.6)
+        );
+
         if (next < currentDownloads) {
           currentDownloads = next;
-          detail.textContent = "Server throttling detected — reducing to " + currentDownloads + " connections";
+
+          detail.textContent =
+            "Server throttling detected — reducing to " +
+            currentDownloads + " connections";
         }
+
         return;
       }
 
       if (event && event.slow) {
         fastCompletions = 0;
-        const next = Math.max(MIN_DOWNLOADS, currentDownloads - 2);
+
+        const next = Math.max(
+          MIN_DOWNLOADS,
+          currentDownloads - 2
+        );
+
         if (next < currentDownloads) {
           currentDownloads = next;
-          detail.textContent = "Slow responses detected — reducing to " + currentDownloads + " connections";
+
+          detail.textContent =
+            "Slow responses detected — reducing to " +
+            currentDownloads + " connections";
         }
+
         return;
       }
 
       fastCompletions++;
-      // Increase cautiously after several healthy transfers; never exceed MAX.
-      if (fastCompletions >= 4 && currentDownloads < MAX_DOWNLOADS) {
-        currentDownloads = Math.min(MAX_DOWNLOADS, currentDownloads + 2);
+
+      if (
+        fastCompletions >= 4 &&
+        currentDownloads < MAX_DOWNLOADS
+      ) {
+        currentDownloads = Math.min(
+          MAX_DOWNLOADS,
+          currentDownloads + 2
+        );
+
         fastCompletions = 0;
       }
     }
 
     async function downloadPart(path, onChunk, onComplete) {
       const started = performance.now();
+
       try {
         const response = await fetchWithFallback(path);
-        const blob = await responseToBlob(response, path, onChunk);
-        const seconds = Math.max(0.1, (performance.now() - started) / 1000);
+
+        const blob = await responseToBlob(
+          response,
+          path,
+          onChunk
+        );
+
+        const seconds = Math.max(
+          0.1,
+          (performance.now() - started) / 1000
+        );
+
         const rate = blob.size / seconds;
-        // A part taking a long time at very low throughput is a practical
-        // signal of congestion. Do not mistake small/quick files for throttling.
-        adaptConcurrency({ slow: seconds > 8 && rate < 180 * 1024 });
-        if (!(seconds > 8 && rate < 180 * 1024)) adaptConcurrency({});
+
+        const isSlow =
+          seconds > 8 &&
+          rate < 180 * 1024;
+
+        if (isSlow) {
+          adaptConcurrency({ slow: true });
+        } else {
+          adaptConcurrency({});
+        }
+
         onComplete(blob.size);
+
         return blob;
+
       } catch (error) {
-        adaptConcurrency({ throttled: !!error.throttled || /Failed to fetch|NetworkError|HTTP (408|425|429|500|502|503|504)/i.test(error.message || "") });
+        adaptConcurrency({
+          throttled:
+            !!error.throttled ||
+            /Failed to fetch|NetworkError|HTTP (408|425|429|500|502|503|504)/i
+              .test(error.message || "")
+        });
+
         throw error;
       }
     }
 
+    // Adaptive concurrent download pool.
     async function runAdaptivePool(tasks, worker) {
       const results = new Array(tasks.length);
+
       let next = 0;
       let active = 0;
       let finished = 0;
+
       return new Promise((resolve, reject) => {
         let failed = false;
+
         function pump() {
           if (failed) return;
-          while (active < currentDownloads && next < tasks.length) {
+
+          while (
+            active < currentDownloads &&
+            next < tasks.length
+          ) {
             const index = next++;
+
             active++;
-            Promise.resolve(worker(tasks[index], index)).then(result => {
+
+            Promise.resolve(
+              worker(tasks[index], index)
+            ).then(result => {
               results[index] = result;
               active--;
               finished++;
-              if (finished === tasks.length) resolve(results);
-              else pump();
+
+              if (finished === tasks.length) {
+                resolve(results);
+              } else {
+                pump();
+              }
+
             }).catch(error => {
               failed = true;
               reject(error);
             });
           }
         }
+
         pump();
       });
     }
-
 
     async function load() {
       try {
         status.textContent = "Loading game engine…";
         detail.textContent = "Preparing downloads";
-        detail.textContent = "Trying available sources";
+
+        // Load UnityLoader using the working Chromebook-compatible method.
         await loadScriptWithFallback("Build/UnityLoader.js");
 
-        if (!window.UnityLoader || typeof UnityLoader.instantiate !== "function") {
-          throw new Error("UnityLoader.js loaded, but UnityLoader.instantiate is unavailable.");
+        if (
+          !window.UnityLoader ||
+          typeof UnityLoader.instantiate !== "function"
+        ) {
+          throw new Error(
+            "UnityLoader.js loaded, but UnityLoader.instantiate is unavailable."
+          );
         }
 
-        const totalParts = assets.reduce((sum, asset) => sum + asset.count, 0);
+        const totalParts = assets.reduce(
+          (sum, asset) => sum + asset.count,
+          0
+        );
+
         let completedParts = 0;
         let downloadedBytes = 0;
-        // Track the latest byte count for each active part. Summing these avoids
-        // the progress display jumping backward when concurrent downloads report.
+
         const activePartBytes = new Map();
 
         function formatSize(bytes) {
@@ -318,88 +503,159 @@
 
         function renderProgress(assetName) {
           let inFlightBytes = 0;
-          for (const value of activePartBytes.values()) inFlightBytes += value;
 
-          const percent = Math.round(completedParts / totalParts * 100);
+          for (const value of activePartBytes.values()) {
+            inFlightBytes += value;
+          }
+
+          const percent = Math.round(
+            completedParts / totalParts * 100
+          );
+
           bar.style.width = percent + "%";
-          status.textContent = "Downloading game files… " + percent + "%";
-          detail.textContent = formatSize(downloadedBytes + inFlightBytes) +
-            " received · " + completedParts + " / " + totalParts +
+
+          status.textContent =
+            "Downloading game files… " + percent + "%";
+
+          detail.textContent =
+            formatSize(downloadedBytes + inFlightBytes) +
+            " received · " +
+            completedParts + " / " + totalParts +
             " parts · " + assetName;
         }
 
-        function updateChunkProgress(partKey, assetName, partBytes) {
+        function updateChunkProgress(
+          partKey,
+          assetName,
+          partBytes
+        ) {
           activePartBytes.set(partKey, partBytes);
           renderProgress(assetName);
         }
 
-        function updateProgress(partKey, assetName, partSize) {
+        function updateProgress(
+          partKey,
+          assetName,
+          partSize
+        ) {
           activePartBytes.delete(partKey);
+
           completedParts++;
           downloadedBytes += partSize;
+
           renderProgress(assetName);
         }
 
-        detail.textContent = "Adaptive mode: starting with " + currentDownloads + " connections (max " + MAX_DOWNLOADS + ")";
+        detail.textContent =
+          "Adaptive mode: starting with " +
+          currentDownloads +
+          " connections (max " +
+          MAX_DOWNLOADS + ")";
 
-        // Process one large asset at a time to reduce peak memory use.
+        // Download and merge each original Unity asset.
         for (const asset of assets) {
-          const tasks = Array.from({ length: asset.count }, (_, index) => ({
-            path: partUrl(asset.name, index + 1),
-            order: index
-          }));
+          const tasks = Array.from(
+            { length: asset.count },
+            (_, index) => ({
+              path: partUrl(asset.name, index + 1),
+              order: index
+            })
+          );
 
-          const parts = await runAdaptivePool(tasks, async task => {
-            const blob = await downloadPart(
-              task.path,
-              partBytes => updateChunkProgress(task.path, asset.name, partBytes),
-              partSize => updateProgress(task.path, asset.name, partSize)
-            );
-            return { order: task.order, blob };
-          });
+          const parts = await runAdaptivePool(
+            tasks,
+            async task => {
+              const blob = await downloadPart(
+                task.path,
+
+                partBytes => {
+                  updateChunkProgress(
+                    task.path,
+                    asset.name,
+                    partBytes
+                  );
+                },
+
+                partSize => {
+                  updateProgress(
+                    task.path,
+                    asset.name,
+                    partSize
+                  );
+                }
+              );
+
+              return {
+                order: task.order,
+                blob
+              };
+            }
+          );
 
           parts.sort((a, b) => a.order - b.order);
-          asset.blob = new Blob(parts.map(part => part.blob));
+
+          asset.blob = new Blob(
+            parts.map(part => part.blob)
+          );
 
           parts.length = 0;
         }
 
+        // Create one Blob URL for each merged asset.
         const objectUrls = {};
+
         for (const asset of assets) {
-          objectUrls[asset.name] = URL.createObjectURL(asset.blob);
+          objectUrls[asset.name] =
+            URL.createObjectURL(asset.blob);
         }
 
+        // Intercept only the original Unity asset requests.
+        // Never rewrite an existing Blob URL.
         const originalOpen = XMLHttpRequest.prototype.open;
-        XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+
+        XMLHttpRequest.prototype.open = function(
+          method,
+          url,
+          ...rest
+        ) {
           const text = String(url);
-          for (const asset of assets) {
-            if (text.includes(asset.name)) {
-              url = objectUrls[asset.name];
-              break;
+
+          if (!text.startsWith("blob:")) {
+            for (const asset of assets) {
+              if (text.includes(asset.name)) {
+                url = objectUrls[asset.name];
+                break;
+              }
             }
           }
-          return originalOpen.call(this, method, url, ...rest);
+
+          return originalOpen.call(
+            this,
+            method,
+            url,
+            ...rest
+          );
         };
 
+        // IMPORTANT:
+        // Do not fetch CupheadPort.json and do not turn it into a Blob URL.
+        // Unity must receive the original configuration path so it can
+        // resolve its framework and other resources correctly.
         status.textContent = "Loading game configuration…";
-        detail.textContent = "Trying available sources";
-
-        // The Unity configuration file also gets the same CDN → Raw → API fallback.
-        const configResponse = await fetchWithFallback("Build/CupheadPort.json");
-        const configText = await configResponse.text();
-        if (!configText || !configText.trim().startsWith("{")) {
-          throw new Error("CupheadPort.json was not valid JSON.");
-        }
-
-        const configUrl = URL.createObjectURL(
-          new Blob([configText], { type: "application/json" })
-        );
+        detail.textContent = "Using original Unity configuration path";
 
         status.textContent = "Starting Cuphead…";
         detail.textContent = "Files ready";
+
         bar.style.width = "100%";
-        UnityLoader.instantiate("gameContainer", configUrl);
+
+        UnityLoader.instantiate(
+          "gameContainer",
+          "Build/CupheadPort.json"
+        );
+
         loading.style.display = "none";
+
       } catch (error) {
         console.error("Cuphead loading error:", error);
         showError(error);
@@ -407,7 +663,9 @@
     }
 
     load();
+
   })();
   </script>
+
 </body>
 </html>
