@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <base href="https://cdn.jsdelivr.net/gh/web-ports/cuphead@c9ff1b6b16f9d402b78a42fc2200e1c076c0ab6e/">
+  <title>Cuphead</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #080808; color: #eee; font: 14px Arial, sans-serif; }
+    #gameContainer { width: 100vw; height: 100vh; }
+    #gameContainer canvas { width: 100% !important; height: 100% !important; }
+    #loading {
+      position: fixed; inset: 0; z-index: 10; display: grid; place-content: center;
+      gap: 14px; padding: 24px; background: #080808; text-align: center;
+    }
+    #loading h1 { margin: 0; font-size: 24px; letter-spacing: 2px; }
+    #status { color: #bbb; }
+    .track { width: min( min(78vw, 420px), 420px ); height: 8px; overflow: hidden; border-radius: 20px; background: #292929; }
+    #bar { width: 0%; height: 100%; background: #eee; transition: width .12s linear; }
+    #detail { color: #888; font-size: 12px; }
+    #error { display: none; max-width: 560px; color: #ff8585; line-height: 1.5; overflow-wrap: anywhere; }
+    #retry { display: none; justify-self: center; padding: 9px 16px; border: 0; border-radius: 5px; background: #eee; color: #111; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div id="loading" role="status" aria-live="polite">
+    <h1>CUPHEAD</h1>
+    <div id="status">Preparing game files…</div>
+    <div class="track"><div id="bar"></div></div>
+    <div id="detail">Starting downloads</div>
+    <div id="error"></div>
+    <button id="retry" type="button" onclick="location.reload()">Try again</button>
+  </div>
+  <div id="gameContainer"></div>
+
+  <script src="Build/UnityLoader.js"></script>
+  <script>
+  (() => {
+    "use strict";
+
+    const loading = document.getElementById("loading");
+    const status = document.getElementById("status");
+    const detail = document.getElementById("detail");
+    const bar = document.getElementById("bar");
+    const errorBox = document.getElementById("error");
+    const retry = document.getElementById("retry");
+
+    const CACHE_NAME = "cuphead-assets-v2";
+    const PARALLEL_DOWNLOADS = 8;
+
+    const assets = [
+      { name: "CupheadPort.data.unityweb", count: 103 },
+      { name: "CupheadPort.wasm.code.unityweb", count: 2 },
+      { name: "CupheadPort.asm.code.unityweb", count: 3 }
+    ];
+
+    function showError(error) {
+      status.textContent = "The game could not be loaded.";
+      detail.textContent = "";
+      bar.style.background = "#e45b5b";
+      errorBox.style.display = "block";
+      errorBox.textContent = error && error.message ? error.message : String(error);
+      retry.style.display = "inline-block";
+    }
+
+    function partUrl(name, number) {
+      return "Build/" + name + ".part" + number;
+    }
+
+    async function downloadPart(cache, url, progress) {
+      const cached = await cache.match(url);
+      if (cached) {
+        const blob = await cached.blob();
+        progress(blob.size);
+        return blob;
+      }
+
+      const response = await fetch(url, { cache: "no-cache" });
+      if (!response.ok) throw new Error("Download failed (" + response.status + "): " + url);
+
+      const length = Number(response.headers.get("content-length")) || 0;
+      const blob = await response.blob();
+      progress(length || blob.size);
+
+      // Keep completed pieces so an interrupted/reloaded session can reuse them.
+      try { await cache.put(url, new Response(blob)); } catch (_) {}
+      return blob;
+    }
+
+    async function runPool(tasks, workerCount, worker) {
+      const results = new Array(tasks.length);
+      let next = 0;
+      async function runner() {
+        while (true) {
+          const index = next++;
+          if (index >= tasks.length) return;
+          results[index] = await worker(tasks[index], index);
+        }
+      }
+      await Promise.all(Array.from({ length: Math.min(workerCount, tasks.length) }, runner));
+      return results;
+    }
+
+    async function load() {
+      try {
+        if (!window.UnityLoader || typeof UnityLoader.instantiate !== "function") {
+          throw new Error("UnityLoader.js did not load. Check the game host or network connection.");
+        }
+
+        const cache = await caches.open(CACHE_NAME);
+        const totalParts = assets.reduce((sum, asset) => sum + asset.count, 0);
+        let completedParts = 0;
+
+        function updateProgress(assetName) {
+          completedParts++;
+          const percent = Math.round(completedParts / totalParts * 100);
+          bar.style.width = percent + "%";
+          status.textContent = "Downloading game files… " + percent + "%";
+          detail.textContent = completedParts + " / " + totalParts + " parts · " + assetName;
+        }
+
+        // Finish and combine one asset at a time. This avoids keeping the
+        // multi-gigabyte data file and the smaller runtime files in memory
+        // simultaneously while they are still being downloaded.
+        for (const asset of assets) {
+          const mergedKey = "merged/" + asset.name;
+          const cachedMerged = await cache.match(mergedKey);
+
+          if (cachedMerged) {
+            asset.blob = await cachedMerged.blob();
+            completedParts += asset.count;
+            const percent = Math.round(completedParts / totalParts * 100);
+            bar.style.width = percent + "%";
+            status.textContent = "Preparing game files… " + percent + "%";
+            detail.textContent = "Using cached " + asset.name;
+            continue;
+          }
+
+          const tasks = Array.from({ length: asset.count }, (_, index) => ({
+            url: partUrl(asset.name, index + 1),
+            order: index
+          }));
+
+          const parts = await runPool(tasks, PARALLEL_DOWNLOADS, async task => {
+            const blob = await downloadPart(cache, task.url, () => updateProgress(asset.name));
+            return { order: task.order, blob };
+          });
+
+          parts.sort((a, b) => a.order - b.order);
+          asset.blob = new Blob(parts.map(part => part.blob));
+          try { await cache.put(mergedKey, new Response(asset.blob)); } catch (_) {}
+
+          // Drop the temporary part references before starting the next asset.
+          parts.length = 0;
+        }
+
+        const objectUrls = {};
+        for (const asset of assets) objectUrls[asset.name] = URL.createObjectURL(asset.blob);
+
+        const originalOpen = XMLHttpRequest.prototype.open;
+        XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+          const text = String(url);
+          for (const asset of assets) {
+            if (text.includes(asset.name)) {
+              url = objectUrls[asset.name];
+              break;
+            }
+          }
+          return originalOpen.call(this, method, url, ...rest);
+        };
+
+        status.textContent = "Starting Cuphead…";
+        detail.textContent = "Files ready";
+        bar.style.width = "100%";
+        UnityLoader.instantiate("gameContainer", "Build/CupheadPort.json");
+        loading.style.display = "none";
+      } catch (error) {
+        console.error("Cuphead loading error:", error);
+        showError(error);
+      }
+    }
+
+    load();
+  })();
+  </script>
+</body>
+</html>
