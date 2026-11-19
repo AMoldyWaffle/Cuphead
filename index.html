@@ -45,8 +45,14 @@
     const errorBox = document.getElementById("error");
     const retry = document.getElementById("retry");
 
-    // A moderate pool speeds up ChromeOS without opening too many connections.
-    const PARALLEL_DOWNLOADS = 8;
+    // Aggressive adaptive downloader: starts fast, then backs off when the
+    // server/browser shows signs of throttling or connection instability.
+    const MIN_DOWNLOADS = 4;
+    const START_DOWNLOADS = 24;
+    const MAX_DOWNLOADS = 32;
+    let currentDownloads = START_DOWNLOADS;
+    let fastCompletions = 0;
+    let throttleEvents = 0;
 
     // Sources are tried in order: GitHub Raw, jsDelivr, then the GitHub API.
     const CDN_ROOT =
@@ -103,7 +109,12 @@
           });
 
           if (!response.ok) {
-            throw new Error("HTTP " + response.status);
+            const err = new Error("HTTP " + response.status);
+            err.httpStatus = response.status;
+            if ([408, 425, 429, 500, 502, 503, 504].includes(response.status)) {
+              err.throttled = true;
+            }
+            throw err;
           }
 
           return response;
@@ -205,29 +216,81 @@
       return "Build/" + name + ".part" + number;
     }
 
-    async function downloadPart(path, onChunk, onComplete) {
-      const response = await fetchWithFallback(path);
-      const blob = await responseToBlob(response, path, onChunk);
-      onComplete(blob.size);
-      return blob;
-    }
-
-    async function runPool(tasks, workerCount, worker) {
-      const results = new Array(tasks.length);
-      let next = 0;
-
-      async function runner() {
-        while (true) {
-          const index = next++;
-          if (index >= tasks.length) return;
-          results[index] = await worker(tasks[index], index);
+    function adaptConcurrency(event) {
+      if (event && event.throttled) {
+        throttleEvents++;
+        fastCompletions = 0;
+        const next = Math.max(MIN_DOWNLOADS, Math.floor(currentDownloads * 0.6));
+        if (next < currentDownloads) {
+          currentDownloads = next;
+          detail.textContent = "Server throttling detected — reducing to " + currentDownloads + " connections";
         }
+        return;
       }
 
-      await Promise.all(
-        Array.from({ length: Math.min(workerCount, tasks.length) }, runner)
-      );
-      return results;
+      if (event && event.slow) {
+        fastCompletions = 0;
+        const next = Math.max(MIN_DOWNLOADS, currentDownloads - 2);
+        if (next < currentDownloads) {
+          currentDownloads = next;
+          detail.textContent = "Slow responses detected — reducing to " + currentDownloads + " connections";
+        }
+        return;
+      }
+
+      fastCompletions++;
+      // Increase cautiously after several healthy transfers; never exceed MAX.
+      if (fastCompletions >= 4 && currentDownloads < MAX_DOWNLOADS) {
+        currentDownloads = Math.min(MAX_DOWNLOADS, currentDownloads + 2);
+        fastCompletions = 0;
+      }
+    }
+
+    async function downloadPart(path, onChunk, onComplete) {
+      const started = performance.now();
+      try {
+        const response = await fetchWithFallback(path);
+        const blob = await responseToBlob(response, path, onChunk);
+        const seconds = Math.max(0.1, (performance.now() - started) / 1000);
+        const rate = blob.size / seconds;
+        // A part taking a long time at very low throughput is a practical
+        // signal of congestion. Do not mistake small/quick files for throttling.
+        adaptConcurrency({ slow: seconds > 8 && rate < 180 * 1024 });
+        if (!(seconds > 8 && rate < 180 * 1024)) adaptConcurrency({});
+        onComplete(blob.size);
+        return blob;
+      } catch (error) {
+        adaptConcurrency({ throttled: !!error.throttled || /Failed to fetch|NetworkError|HTTP (408|425|429|500|502|503|504)/i.test(error.message || "") });
+        throw error;
+      }
+    }
+
+    async function runAdaptivePool(tasks, worker) {
+      const results = new Array(tasks.length);
+      let next = 0;
+      let active = 0;
+      let finished = 0;
+      return new Promise((resolve, reject) => {
+        let failed = false;
+        function pump() {
+          if (failed) return;
+          while (active < currentDownloads && next < tasks.length) {
+            const index = next++;
+            active++;
+            Promise.resolve(worker(tasks[index], index)).then(result => {
+              results[index] = result;
+              active--;
+              finished++;
+              if (finished === tasks.length) resolve(results);
+              else pump();
+            }).catch(error => {
+              failed = true;
+              reject(error);
+            });
+          }
+        }
+        pump();
+      });
     }
 
 
@@ -277,6 +340,8 @@
           renderProgress(assetName);
         }
 
+        detail.textContent = "Adaptive mode: starting with " + currentDownloads + " connections (max " + MAX_DOWNLOADS + ")";
+
         // Process one large asset at a time to reduce peak memory use.
         for (const asset of assets) {
           const tasks = Array.from({ length: asset.count }, (_, index) => ({
@@ -284,7 +349,7 @@
             order: index
           }));
 
-          const parts = await runPool(tasks, PARALLEL_DOWNLOADS, async task => {
+          const parts = await runAdaptivePool(tasks, async task => {
             const blob = await downloadPart(
               task.path,
               partBytes => updateChunkProgress(task.path, asset.name, partBytes),
