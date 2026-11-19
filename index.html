@@ -34,7 +34,6 @@
   </div>
   <div id="gameContainer"></div>
 
-  <script src="Build/UnityLoader.js"></script>
   <script>
   (() => {
     "use strict";
@@ -46,8 +45,24 @@
     const errorBox = document.getElementById("error");
     const retry = document.getElementById("retry");
 
-    const CACHE_NAME = "cuphead-assets-v2";
+    const CACHE_NAME = "cuphead-assets-v3";
     const PARALLEL_DOWNLOADS = 8;
+
+    // Sources are tried in order: jsDelivr, GitHub Raw, then the GitHub API.
+    const CDN_ROOT =
+      "https://cdn.jsdelivr.net/gh/web-ports/cuphead@c9ff1b6b16f9d402b78a42fc2200e1c076c0ab6e/";
+    const RAW_ROOT =
+      "https://raw.githubusercontent.com/AMoldyWaffle/Cuphead/main/";
+    const API_ROOT =
+      "https://api.github.com/repos/AMoldyWaffle/Cuphead/contents/";
+
+    // Unique token for this page load. This asks browsers/CDNs for a fresh URL.
+    const CACHE_BUSTER = "fresh=" + Date.now() + "-" +
+      Math.random().toString(36).slice(2);
+
+    function withCacheBuster(url) {
+      return url + (url.includes("?") ? "&" : "?") + CACHE_BUSTER;
+    }
 
     const assets = [
       { name: "CupheadPort.data.unityweb", count: 103 },
@@ -64,33 +79,99 @@
       retry.style.display = "inline-block";
     }
 
+    function sourceUrls(path) {
+      const safePath = path.split("/").map(encodeURIComponent).join("/");
+      return [
+        withCacheBuster(CDN_ROOT + path),
+        withCacheBuster(RAW_ROOT + safePath),
+        withCacheBuster(API_ROOT + safePath + "?ref=main")
+      ];
+    }
+
+    async function fetchWithFallback(path, options = {}) {
+      const urls = sourceUrls(path);
+      const failures = [];
+
+      for (let i = 0; i < urls.length; i++) {
+        try {
+          const headers = { ...(options.headers || {}) };
+          if (i === 2) {
+            headers.Accept = "application/vnd.github.raw+json";
+          }
+
+          const response = await fetch(urls[i], {
+            ...options,
+            headers,
+            cache: "no-store"
+          });
+
+          if (!response.ok) {
+            throw new Error("HTTP " + response.status);
+          }
+
+          return response;
+        } catch (error) {
+          failures.push(urls[i] + " — " + (error.message || error));
+        }
+      }
+
+      throw new Error(
+        "All download sources failed for " + path + ". " + failures.join(" | ")
+      );
+    }
+
+    function loadScriptWithFallback(path) {
+      return new Promise((resolve, reject) => {
+        const urls = sourceUrls(path);
+        let index = 0;
+        const errors = [];
+
+        function attempt() {
+          if (index >= urls.length) {
+            reject(new Error(
+              "UnityLoader.js could not be loaded from any source. " +
+              errors.join(" | ")
+            ));
+            return;
+          }
+
+          const script = document.createElement("script");
+          script.src = urls[index++];
+          script.onload = () => resolve();
+          script.onerror = () => {
+            errors.push(script.src);
+            script.remove();
+            attempt();
+          };
+          document.head.appendChild(script);
+        }
+
+        attempt();
+      });
+    }
+
     function partUrl(name, number) {
       return "Build/" + name + ".part" + number;
     }
 
-    async function downloadPart(cache, url, progress) {
-      const cached = await cache.match(url);
-      if (cached) {
-        const blob = await cached.blob();
-        progress(blob.size);
-        return blob;
-      }
-
-      const response = await fetch(url, { cache: "no-cache" });
-      if (!response.ok) throw new Error("Download failed (" + response.status + "): " + url);
-
-      const length = Number(response.headers.get("content-length")) || 0;
+    async function downloadPart(cache, path, progress) {
+      const cacheKey = new Request(new URL(path, CDN_ROOT).href);
+      const response = await fetchWithFallback(path);
       const blob = await response.blob();
-      progress(length || blob.size);
+      progress(Number(response.headers.get("content-length")) || blob.size);
 
-      // Keep completed pieces so an interrupted/reloaded session can reuse them.
-      try { await cache.put(url, new Response(blob)); } catch (_) {}
+      // Store under a stable key so a part downloaded from any mirror can be reused.
+      try {
+        await cache.put(cacheKey, new Response(blob));
+      } catch (_) {}
+
       return blob;
     }
 
     async function runPool(tasks, workerCount, worker) {
       const results = new Array(tasks.length);
       let next = 0;
+
       async function runner() {
         while (true) {
           const index = next++;
@@ -98,15 +179,28 @@
           results[index] = await worker(tasks[index], index);
         }
       }
-      await Promise.all(Array.from({ length: Math.min(workerCount, tasks.length) }, runner));
+
+      await Promise.all(
+        Array.from({ length: Math.min(workerCount, tasks.length) }, runner)
+      );
       return results;
     }
 
     async function load() {
       try {
+        status.textContent = "Loading game engine…";
+        detail.textContent = "Trying available sources";
+        await loadScriptWithFallback("Build/UnityLoader.js");
+
         if (!window.UnityLoader || typeof UnityLoader.instantiate !== "function") {
-          throw new Error("UnityLoader.js did not load. Check the game host or network connection.");
+          throw new Error("UnityLoader.js loaded, but UnityLoader.instantiate is unavailable.");
         }
+
+        // Clear this launcher's saved Cache Storage entries before downloading.
+        // This does not purge a shared CDN's edge cache; unique URLs above request fresh copies.
+        try {
+          await caches.delete(CACHE_NAME);
+        } catch (_) {}
 
         const cache = await caches.open(CACHE_NAME);
         const totalParts = assets.reduce((sum, asset) => sum + asset.count, 0);
@@ -120,43 +214,38 @@
           detail.textContent = completedParts + " / " + totalParts + " parts · " + assetName;
         }
 
-        // Finish and combine one asset at a time. This avoids keeping the
-        // multi-gigabyte data file and the smaller runtime files in memory
-        // simultaneously while they are still being downloaded.
+        // Process one large asset at a time to reduce peak memory use.
         for (const asset of assets) {
           const mergedKey = "merged/" + asset.name;
-          const cachedMerged = await cache.match(mergedKey);
-
-          if (cachedMerged) {
-            asset.blob = await cachedMerged.blob();
-            completedParts += asset.count;
-            const percent = Math.round(completedParts / totalParts * 100);
-            bar.style.width = percent + "%";
-            status.textContent = "Preparing game files… " + percent + "%";
-            detail.textContent = "Using cached " + asset.name;
-            continue;
-          }
 
           const tasks = Array.from({ length: asset.count }, (_, index) => ({
-            url: partUrl(asset.name, index + 1),
+            path: partUrl(asset.name, index + 1),
             order: index
           }));
 
           const parts = await runPool(tasks, PARALLEL_DOWNLOADS, async task => {
-            const blob = await downloadPart(cache, task.url, () => updateProgress(asset.name));
+            const blob = await downloadPart(
+              cache,
+              task.path,
+              () => updateProgress(asset.name)
+            );
             return { order: task.order, blob };
           });
 
           parts.sort((a, b) => a.order - b.order);
           asset.blob = new Blob(parts.map(part => part.blob));
-          try { await cache.put(mergedKey, new Response(asset.blob)); } catch (_) {}
 
-          // Drop the temporary part references before starting the next asset.
+          try {
+            await cache.put(mergedKey, new Response(asset.blob));
+          } catch (_) {}
+
           parts.length = 0;
         }
 
         const objectUrls = {};
-        for (const asset of assets) objectUrls[asset.name] = URL.createObjectURL(asset.blob);
+        for (const asset of assets) {
+          objectUrls[asset.name] = URL.createObjectURL(asset.blob);
+        }
 
         const originalOpen = XMLHttpRequest.prototype.open;
         XMLHttpRequest.prototype.open = function(method, url, ...rest) {
@@ -170,10 +259,24 @@
           return originalOpen.call(this, method, url, ...rest);
         };
 
+        status.textContent = "Loading game configuration…";
+        detail.textContent = "Trying available sources";
+
+        // The Unity configuration file also gets the same CDN → Raw → API fallback.
+        const configResponse = await fetchWithFallback("Build/CupheadPort.json");
+        const configText = await configResponse.text();
+        if (!configText || !configText.trim().startsWith("{")) {
+          throw new Error("CupheadPort.json was not valid JSON.");
+        }
+
+        const configUrl = URL.createObjectURL(
+          new Blob([configText], { type: "application/json" })
+        );
+
         status.textContent = "Starting Cuphead…";
         detail.textContent = "Files ready";
         bar.style.width = "100%";
-        UnityLoader.instantiate("gameContainer", "Build/CupheadPort.json");
+        UnityLoader.instantiate("gameContainer", configUrl);
         loading.style.display = "none";
       } catch (error) {
         console.error("Cuphead loading error:", error);
